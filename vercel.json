@@ -1,7 +1,8 @@
 {
-  "buildCommand": "npm run build",
-  "devCommand": "npm run dev",
-  "installCommand": "npm install",
-  "framework": "nextjs"
+  "builds": [
+    { "src": "ai-eval/app.py", "use": "@vercel/python" }
+  ],
+  "routes": [
+    { "src": "/(.*)", "dest": "ai-eval/app.py" }
+  ]
 }
-

@@ -23,12 +23,13 @@ from io import BytesIO
 load_dotenv()
 
 # Configure logging
+log_file_path = os.path.join(tempfile.gettempdir(), 'app.log')
 logging.basicConfig(
     level=logging.DEBUG if os.getenv('FLASK_DEBUG', 'False').lower() == 'true' else logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler('app.log')
+        logging.FileHandler(log_file_path)
     ]
 )
 

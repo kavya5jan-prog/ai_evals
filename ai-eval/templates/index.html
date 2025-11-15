@@ -39,37 +39,63 @@
                 <div class="phase-header-with-action">
                     <div>
                         <h2>Step 2: Map Rubrics to Sections</h2>
-                        <p class="phase-description">Review the extracted sections and add rubrics for each section. You can upload a rubric PDF to auto-map sections, or enter rubrics manually. Sections without rubrics will be marked with a warning.</p>
+                        <p class="phase-description">Review the extracted sections and add rubrics manually for each section. Sections without rubrics will be marked with a warning.</p>
                     </div>
-                    <button type="button" id="startOverBtn" class="start-over-btn" onclick="startOver()">
-                        <span>🔄</span> Upload New PDF
-                    </button>
-                </div>
-                
-                <!-- Rubric PDF Upload Section -->
-                <div id="rubricUploadSection" class="rubric-upload-section">
-                    <h3>Upload Rubric PDF (Optional)</h3>
-                    <p class="rubric-upload-description">Upload a rubric PDF to automatically map rubric sections to your PDF sections based on matching section names.</p>
-                    <div class="rubric-upload-controls">
-                        <input type="file" id="rubricPdfInput" accept=".pdf" style="display: none;">
-                        <label for="rubricPdfInput" class="file-upload-label rubric-upload-label">
-                            <span class="upload-icon">📋</span>
-                            <span class="upload-text">Choose Rubric PDF</span>
-                        </label>
-                        <span id="rubricFileName" class="file-name"></span>
-                        <button type="button" id="mapRubricBtn" class="upload-btn" disabled>
-                            Map Rubrics
+                    <div style="display: flex; gap: 10px;">
+                        <button type="button" id="generateRubricsBtn" class="generate-rubrics-btn" onclick="openRubricModal()">
+                            <span>✨</span> Generate Rubrics from Template
+                        </button>
+                        <button type="button" id="startOverBtn" class="start-over-btn" onclick="startOver()">
+                            <span>🔄</span> Upload New PDF
                         </button>
                     </div>
-                    <div id="rubricUploadLoading" class="loading-message" style="display: none;">
-                        <span class="spinner"></span>
-                        <span>Parsing rubric PDF and matching sections...</span>
-                    </div>
-                    <div id="rubricMappingStatus" class="rubric-mapping-status" style="display: none;"></div>
                 </div>
                 
                 <div id="mappingContainer" class="mapping-container">
                     <!-- Sections with rubrics will be displayed here -->
+                </div>
+            </div>
+
+            <!-- Master Prompt Modal -->
+            <div id="rubricModal" class="modal" style="display: none;">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h2>Generate Rubrics from Template</h2>
+                        <button type="button" class="modal-close" onclick="closeRubricModal()">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="form-group">
+                            <label for="masterPromptInput">
+                                Master Prompt Template
+                                <span class="help-text">Use {SECTION_HEADER} or {SECTION_TITLE} as a placeholder for the section title</span>
+                            </label>
+                            <textarea 
+                                id="masterPromptInput" 
+                                class="master-prompt-textarea"
+                                rows="8"
+                                placeholder="Example: Generate evaluation criteria for the section titled {SECTION_HEADER}. The rubric should assess clarity, completeness, and alignment with best practices."
+                            ></textarea>
+                        </div>
+                        <div id="modalProgress" class="modal-progress" style="display: none;">
+                            <div class="progress-info">
+                                <span class="spinner"></span>
+                                <span id="modalProgressText">Generating rubric...</span>
+                            </div>
+                        </div>
+                        <div id="modalError" class="modal-error" style="display: none;"></div>
+                        <div id="modalCurrentSection" class="modal-current-section" style="display: none;">
+                            <strong>Current Section:</strong> <span id="currentSectionName"></span>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" id="generateRubricBtn" class="submit-btn" onclick="generateCurrentRubric()">
+                            Generate Rubric
+                        </button>
+                        <button type="button" id="nextSectionBtn" class="submit-btn" onclick="moveToNextSection()" style="display: none;">
+                            Next Section
+                        </button>
+                        <button type="button" class="cancel-btn" onclick="closeRubricModal()">Close</button>
+                    </div>
                 </div>
             </div>
 
@@ -124,11 +150,6 @@
         const resultsContent = document.getElementById('resultsContent');
         const errorMessage = document.getElementById('errorMessage');
         const exportPdfBtn = document.getElementById('exportPdfBtn');
-        const rubricPdfInput = document.getElementById('rubricPdfInput');
-        const rubricFileName = document.getElementById('rubricFileName');
-        const mapRubricBtn = document.getElementById('mapRubricBtn');
-        const rubricUploadLoading = document.getElementById('rubricUploadLoading');
-        const rubricMappingStatus = document.getElementById('rubricMappingStatus');
 
         // State
         let pdfSections = [];
@@ -185,109 +206,6 @@
             } else {
                 fileName.textContent = '';
                 uploadBtn.disabled = true;
-            }
-        });
-
-        // Rubric PDF file input handler
-        rubricPdfInput.addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            if (file) {
-                rubricFileName.textContent = file.name;
-                mapRubricBtn.disabled = false;
-            } else {
-                rubricFileName.textContent = '';
-                mapRubricBtn.disabled = true;
-            }
-        });
-
-        // Map rubric button handler
-        mapRubricBtn.addEventListener('click', async () => {
-            const file = rubricPdfInput.files[0];
-            if (!file) {
-                showError('Please select a rubric PDF file');
-                return;
-            }
-
-            if (pdfSections.length === 0) {
-                showError('Please upload and parse the main PDF first');
-                return;
-            }
-
-            mapRubricBtn.disabled = true;
-            rubricUploadLoading.style.display = 'flex';
-            rubricMappingStatus.style.display = 'none';
-            errorMessage.style.display = 'none';
-
-            const formData = new FormData();
-            formData.append('rubric_file', file);
-            formData.append('pdf_sections', JSON.stringify(pdfSections));
-
-            try {
-                const response = await fetch('/map-rubric-pdf', {
-                    method: 'POST',
-                    body: formData
-                });
-
-                const data = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(data.error || 'Failed to map rubric PDF');
-                }
-
-                if (data.success && data.matches) {
-                    const matches = data.matches;
-                    const matchedCount = Object.keys(matches).length;
-                    
-                    // Auto-populate rubrics
-                    const rubrics = JSON.parse(localStorage.getItem('rubrics') || '{}');
-                    let populatedCount = 0;
-                    
-                    Object.keys(matches).forEach(sectionIndex => {
-                        const match = matches[sectionIndex];
-                        const rubricContent = match.rubric_content;
-                        if (rubricContent && rubricContent.trim()) {
-                            rubrics[sectionIndex] = rubricContent.trim();
-                            populatedCount++;
-                            
-                            // Update textarea if it exists
-                            const textarea = document.getElementById(`rubric_${sectionIndex}`);
-                            if (textarea) {
-                                textarea.value = rubricContent.trim();
-                            }
-                        }
-                    });
-                    
-                    localStorage.setItem('rubrics', JSON.stringify(rubrics));
-                    
-                    // Update warning icons
-                    pdfSections.forEach(section => {
-                        const rubric = rubrics[section.index];
-                        if (rubric) {
-                            updateWarningIcon(section.index, rubric);
-                        }
-                    });
-                    
-                    // Show status message
-                    rubricMappingStatus.style.display = 'block';
-                    rubricMappingStatus.className = 'rubric-mapping-status success';
-                    rubricMappingStatus.innerHTML = `
-                        <strong>✓ Successfully mapped ${populatedCount} of ${matchedCount} matched sections</strong>
-                        ${matchedCount < pdfSections.length ? `<br><small>${pdfSections.length - matchedCount} sections could not be automatically matched. Please add rubrics manually.</small>` : ''}
-                    `;
-                    
-                    // Re-render to update all sections
-                    displayMappingInterface();
-                } else {
-                    throw new Error('No matches found in rubric PDF');
-                }
-            } catch (error) {
-                showError(error.message || 'Error mapping rubric PDF. Please try again.');
-                rubricMappingStatus.style.display = 'block';
-                rubricMappingStatus.className = 'rubric-mapping-status error';
-                rubricMappingStatus.innerHTML = `<strong>Error:</strong> ${error.message || 'Failed to map rubric PDF'}`;
-            } finally {
-                rubricUploadLoading.style.display = 'none';
-                mapRubricBtn.disabled = false;
             }
         });
 
@@ -494,21 +412,6 @@
             pdfFileInput.value = '';
             fileName.textContent = '';
             uploadBtn.disabled = true;
-            
-            // Clear rubric file input
-            if (rubricPdfInput) {
-                rubricPdfInput.value = '';
-            }
-            if (rubricFileName) {
-                rubricFileName.textContent = '';
-            }
-            if (mapRubricBtn) {
-                mapRubricBtn.disabled = true;
-            }
-            if (rubricMappingStatus) {
-                rubricMappingStatus.style.display = 'none';
-                rubricMappingStatus.innerHTML = '';
-            }
             
             // Hide phases
             mappingPhase.style.display = 'none';
@@ -1126,6 +1029,217 @@
 
         // Load saved data on page load
         loadFromLocalStorage();
+
+        // Master Prompt Rubric Generation
+        let currentSectionIndex = 0;
+        let masterPromptTemplate = '';
+
+        // Modal DOM elements (will be initialized after DOM is ready)
+        let rubricModal, masterPromptInput, modalProgress, modalProgressText, modalError;
+        let modalCurrentSection, currentSectionName, generateRubricBtn, nextSectionBtn;
+
+        // Initialize modal elements
+        function initModalElements() {
+            rubricModal = document.getElementById('rubricModal');
+            masterPromptInput = document.getElementById('masterPromptInput');
+            modalProgress = document.getElementById('modalProgress');
+            modalProgressText = document.getElementById('modalProgressText');
+            modalError = document.getElementById('modalError');
+            modalCurrentSection = document.getElementById('modalCurrentSection');
+            currentSectionName = document.getElementById('currentSectionName');
+            generateRubricBtn = document.getElementById('generateRubricBtn');
+            nextSectionBtn = document.getElementById('nextSectionBtn');
+        }
+
+        // Load master prompt from localStorage
+        function loadMasterPrompt() {
+            const saved = localStorage.getItem('master_prompt_template');
+            if (saved) {
+                masterPromptInput.value = saved;
+                masterPromptTemplate = saved;
+            }
+        }
+
+        // Save master prompt to localStorage
+        function saveMasterPrompt() {
+            const prompt = masterPromptInput.value.trim();
+            if (prompt) {
+                localStorage.setItem('master_prompt_template', prompt);
+                masterPromptTemplate = prompt;
+            }
+        }
+
+        // Open rubric generation modal
+        window.openRubricModal = function() {
+            loadMasterPrompt();
+            currentSectionIndex = 0;
+            findNextSectionWithoutRubric();
+            rubricModal.style.display = 'flex';
+            updateModalUI();
+        };
+
+        // Close rubric generation modal
+        window.closeRubricModal = function() {
+            rubricModal.style.display = 'none';
+            modalError.style.display = 'none';
+            modalProgress.style.display = 'none';
+            modalCurrentSection.style.display = 'none';
+            nextSectionBtn.style.display = 'none';
+            generateRubricBtn.style.display = 'inline-block';
+            saveMasterPrompt();
+        };
+
+        // Find next section without a rubric
+        function findNextSectionWithoutRubric() {
+            const rubrics = JSON.parse(localStorage.getItem('rubrics') || '{}');
+            for (let i = 0; i < pdfSections.length; i++) {
+                const section = pdfSections[i];
+                if (!rubrics[section.index] || !rubrics[section.index].trim()) {
+                    currentSectionIndex = i;
+                    return;
+                }
+            }
+            // All sections have rubrics
+            currentSectionIndex = pdfSections.length;
+        }
+
+        // Update modal UI based on current state
+        function updateModalUI() {
+            if (currentSectionIndex >= pdfSections.length) {
+                modalCurrentSection.style.display = 'block';
+                currentSectionName.textContent = 'All sections have rubrics!';
+                generateRubricBtn.style.display = 'none';
+                nextSectionBtn.style.display = 'none';
+                return;
+            }
+
+            const currentSection = pdfSections[currentSectionIndex];
+            modalCurrentSection.style.display = 'block';
+            currentSectionName.textContent = `Section ${currentSection.index}: ${escapeHtml(currentSection.title)}`;
+            generateRubricBtn.style.display = 'inline-block';
+            nextSectionBtn.style.display = 'none';
+        }
+
+        // Generate rubric for current section
+        window.generateCurrentRubric = async function() {
+            const masterPrompt = masterPromptInput.value.trim();
+            
+            if (!masterPrompt) {
+                showModalError('Please enter a master prompt template.');
+                return;
+            }
+
+            if (currentSectionIndex >= pdfSections.length) {
+                showModalError('All sections already have rubrics.');
+                return;
+            }
+
+            const currentSection = pdfSections[currentSectionIndex];
+            
+            // Check if placeholder exists
+            if (!masterPrompt.includes('{SECTION_HEADER}') && !masterPrompt.includes('{SECTION_TITLE}')) {
+                showModalError('Master prompt must include {SECTION_HEADER} or {SECTION_TITLE} placeholder.');
+                return;
+            }
+
+            // Save master prompt
+            saveMasterPrompt();
+
+            // Show loading state
+            generateRubricBtn.disabled = true;
+            modalProgress.style.display = 'block';
+            modalError.style.display = 'none';
+            modalProgressText.textContent = `Generating rubric for Section ${currentSection.index}...`;
+
+            try {
+                const response = await fetch('/generate-rubric', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        master_prompt: masterPrompt,
+                        section_title: currentSection.title,
+                        section_content: currentSection.content
+                    })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || 'Failed to generate rubric');
+                }
+
+                // Success - populate the rubric textarea
+                const rubricTextarea = document.getElementById(`rubric_${currentSection.index}`);
+                if (rubricTextarea) {
+                    rubricTextarea.value = data.rubric;
+                    // Trigger input event to update UI
+                    rubricTextarea.dispatchEvent(new Event('input'));
+                }
+
+                // Save to localStorage
+                const rubrics = JSON.parse(localStorage.getItem('rubrics') || '{}');
+                rubrics[currentSection.index] = data.rubric;
+                localStorage.setItem('rubrics', JSON.stringify(rubrics));
+
+                // Update warning badge
+                updateWarningIcon(currentSection.index, data.rubric);
+
+                // Show success and enable next section button
+                modalProgress.style.display = 'none';
+                modalError.style.display = 'none';
+                generateRubricBtn.disabled = false;
+                nextSectionBtn.style.display = 'inline-block';
+                
+                // Scroll to the section that was just updated
+                const sectionDiv = document.querySelector(`[data-section-index="${currentSection.index}"]`);
+                if (sectionDiv) {
+                    sectionDiv.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+
+            } catch (error) {
+                showModalError(error.message || 'An error occurred while generating the rubric. Please try again.');
+                generateRubricBtn.disabled = false;
+                modalProgress.style.display = 'none';
+            }
+        };
+
+        // Move to next section without rubric
+        window.moveToNextSection = function() {
+            currentSectionIndex++;
+            findNextSectionWithoutRubric();
+            updateModalUI();
+            
+            // Scroll to current section
+            if (currentSectionIndex < pdfSections.length) {
+                const currentSection = pdfSections[currentSectionIndex];
+                const sectionDiv = document.querySelector(`[data-section-index="${currentSection.index}"]`);
+                if (sectionDiv) {
+                    sectionDiv.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            }
+        };
+
+        // Show error in modal
+        function showModalError(message) {
+            modalError.textContent = message;
+            modalError.style.display = 'block';
+            modalProgress.style.display = 'none';
+        }
+
+        // Initialize modal elements and load master prompt on page load
+        initModalElements();
+        loadMasterPrompt();
+
+        // Close modal when clicking outside (after initialization)
+        if (rubricModal) {
+            rubricModal.addEventListener('click', function(e) {
+                if (e.target === rubricModal) {
+                    closeRubricModal();
+                }
+            });
+        }
     </script>
 </body>
 </html>

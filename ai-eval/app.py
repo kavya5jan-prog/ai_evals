@@ -207,224 +207,6 @@ def parse_pdf():
         }), 500
 
 
-def match_sections_with_openai(pdf_sections, rubric_sections):
-    """Use OpenAI to intelligently match rubric sections to PDF sections"""
-    logger.info("Using OpenAI to match sections")
-    
-    # Format PDF sections for the prompt
-    pdf_sections_list = []
-    for section in pdf_sections:
-        pdf_sections_list.append({
-            'index': section.get('index', ''),
-            'title': section.get('title', ''),
-            'content_preview': section.get('content', '')[:500]  # Include preview of content for context
-        })
-    
-    # Format rubric sections for the prompt
-    rubric_sections_list = []
-    for section in rubric_sections:
-        content = section.get('content', '')
-        # Include full content if short, otherwise truncate intelligently
-        if len(content) > 3000:
-            # Try to truncate at a sentence boundary
-            truncated = content[:3000]
-            last_period = truncated.rfind('.')
-            if last_period > 2500:  # Only truncate at period if it's not too early
-                content = truncated[:last_period + 1] + "..."
-            else:
-                content = truncated + "..."
-        
-        rubric_sections_list.append({
-            'title': section.get('title', ''),
-            'content': content
-        })
-    
-    # Create the prompt
-    prompt = f"""You are helping to map rubric sections to PDF response sections for an RFP evaluation tool.
-
-**PDF Response Sections (these need rubrics assigned):**
-{json.dumps(pdf_sections_list, indent=2)}
-
-**Available Rubric Sections (these contain evaluation criteria):**
-{json.dumps(rubric_sections_list, indent=2)}
-
-Your task is to match each PDF response section to the most appropriate rubric section based on:
-1. Semantic similarity of section titles
-2. Topic alignment and content relevance
-3. Whether the rubric's evaluation criteria apply to that PDF section
-
-Important rules:
-- A rubric section can be matched to multiple PDF sections if it's relevant to all of them
-- A PDF section can have no match if no rubric is appropriate (omit it from mappings)
-- Only create mappings where you have at least "medium" confidence
-- Consider the actual content, not just titles - use the content previews to understand context
-
-Return your response as a JSON object with this exact format:
-{{
-  "mappings": [
-    {{
-      "pdf_section_index": "1",
-      "pdf_section_title": "SECTION TITLE",
-      "matched_rubric_title": "RUBRIC TITLE",
-      "confidence": "high|medium|low",
-      "reasoning": "Brief explanation of why this match was made"
-    }}
-  ]
-}}
-
-Return ONLY the JSON object, no additional text, markdown, or explanation before or after."""
-
-    try:
-        openai_client = get_openai_client()
-        logger.info("Calling OpenAI API for section matching...")
-        
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are an expert at matching document sections. You must respond with valid JSON only, no additional text."},
-                {"role": "user", "content": prompt}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.3
-        )
-        
-        result_text = response.choices[0].message.content
-        logger.debug(f"OpenAI response: {result_text}")
-        
-        # Parse the JSON response
-        result = json.loads(result_text)
-        mappings = result.get('mappings', [])
-        
-        # Convert to the expected format
-        matches = {}
-        for mapping in mappings:
-            pdf_index = mapping.get('pdf_section_index')
-            rubric_title = mapping.get('matched_rubric_title', '').strip()
-            
-            # Find the full rubric content - use fuzzy matching for title
-            matched_rubric = None
-            best_match_score = 0
-            
-            # Normalize for comparison
-            rubric_title_normalized = re.sub(r'\s+', ' ', rubric_title.upper().strip())
-            
-            for rubric_section in rubric_sections:
-                section_title = rubric_section.get('title', '').strip()
-                section_title_normalized = re.sub(r'\s+', ' ', section_title.upper().strip())
-                
-                # Exact match
-                if section_title_normalized == rubric_title_normalized:
-                    matched_rubric = rubric_section
-                    break
-                # Check if one contains the other (for slight variations)
-                elif rubric_title_normalized in section_title_normalized or section_title_normalized in rubric_title_normalized:
-                    # Prefer longer match
-                    if len(section_title_normalized) > best_match_score:
-                        matched_rubric = rubric_section
-                        best_match_score = len(section_title_normalized)
-            
-            if matched_rubric and pdf_index:
-                matches[pdf_index] = {
-                    'rubric_title': matched_rubric.get('title', ''),
-                    'rubric_content': matched_rubric.get('content', ''),
-                    'match_score': 0.9 if mapping.get('confidence') == 'high' else 0.7 if mapping.get('confidence') == 'medium' else 0.5,
-                    'reasoning': mapping.get('reasoning', '')
-                }
-        
-        logger.info(f"OpenAI matched {len(matches)} sections")
-        return matches
-        
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse OpenAI JSON response: {str(e)}")
-        logger.error(f"Response was: {result_text}")
-        raise ValueError("OpenAI returned invalid JSON. Please try again.")
-    except AuthenticationError as e:
-        logger.error(f"OpenAI authentication error: {str(e)}")
-        raise ValueError("OpenAI API authentication failed. Please check your API key.")
-    except RateLimitError as e:
-        logger.warning(f"OpenAI rate limit error: {str(e)}")
-        raise ValueError("OpenAI API rate limit exceeded. Please try again in a moment.")
-    except APIError as e:
-        error_msg = str(e)
-        logger.error(f"OpenAI API error: {error_msg}")
-        if "insufficient_quota" in error_msg.lower() or "quota" in error_msg.lower():
-            raise ValueError("OpenAI API quota exceeded. Please check your account billing.")
-        else:
-            raise ValueError(f"OpenAI API error: {error_msg}")
-    except Exception as e:
-        logger.error(f"Error in OpenAI matching: {str(e)}", exc_info=True)
-        raise ValueError(f"Error matching sections: {str(e)}")
-
-
-@app.route('/map-rubric-pdf', methods=['POST'])
-def map_rubric_pdf():
-    """Parse rubric PDF and match sections to existing PDF sections"""
-    logger.info("Map rubric PDF endpoint called")
-    
-    try:
-        if 'rubric_file' not in request.files:
-            logger.warning("No rubric file in request")
-            return jsonify({'error': 'No rubric file provided'}), 400
-        
-        rubric_file = request.files['rubric_file']
-        
-        if rubric_file.filename == '':
-            logger.warning("Empty rubric filename")
-            return jsonify({'error': 'No rubric file selected'}), 400
-        
-        # Validate file type
-        if not rubric_file.filename.lower().endswith('.pdf'):
-            logger.warning(f"Invalid rubric file type: {rubric_file.filename}")
-            return jsonify({'error': 'Rubric file must be a PDF'}), 400
-        
-        # Get PDF sections from request
-        pdf_sections_data = request.form.get('pdf_sections')
-        if not pdf_sections_data:
-            logger.warning("No PDF sections provided")
-            return jsonify({'error': 'PDF sections are required'}), 400
-        
-        try:
-            pdf_sections = json.loads(pdf_sections_data)
-        except json.JSONDecodeError:
-            logger.warning("Invalid JSON in PDF sections")
-            return jsonify({'error': 'Invalid PDF sections data'}), 400
-        
-        # Save rubric file temporarily
-        filename = secure_filename(rubric_file.filename)
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        rubric_file.save(filepath)
-        
-        logger.info(f"Rubric PDF saved to {filepath}, extracting sections...")
-        
-        # Extract sections from rubric PDF
-        rubric_sections = extract_sections_from_pdf(filepath)
-        
-        # Clean up temporary file
-        try:
-            os.remove(filepath)
-        except Exception as e:
-            logger.warning(f"Could not remove temporary file {filepath}: {str(e)}")
-        
-        logger.info(f"Extracted {len(rubric_sections)} sections from rubric PDF")
-        
-        # Match rubric sections to PDF sections using OpenAI
-        matches = match_sections_with_openai(pdf_sections, rubric_sections)
-        
-        logger.info(f"Matched {len(matches)} sections using OpenAI")
-        
-        return jsonify({
-            'success': True,
-            'matches': matches,
-            'rubric_sections': rubric_sections
-        })
-    
-    except Exception as e:
-        logger.error(f"Error mapping rubric PDF: {str(e)}", exc_info=True)
-        return jsonify({
-            'error': f'Error mapping rubric PDF: {str(e)}'
-        }), 500
-
-
 def is_markdown_table(text):
     """Check if the response contains a markdown table format"""
     if not text:
@@ -444,6 +226,146 @@ def is_markdown_table(text):
     
     # Require at least 2 table rows (header + at least one data row or separator)
     return table_row_count >= 2
+
+
+def generate_rubric_from_template(master_prompt, section_title, section_content=None):
+    """Generate a rubric for a section using a master prompt template"""
+    import re
+    
+    # Replace placeholders (case-insensitive)
+    # Support both {SECTION_HEADER} and {SECTION_TITLE}
+    filled_prompt = master_prompt
+    filled_prompt = re.sub(r'\{SECTION_HEADER\}', section_title, filled_prompt, flags=re.IGNORECASE)
+    filled_prompt = re.sub(r'\{SECTION_TITLE\}', section_title, filled_prompt, flags=re.IGNORECASE)
+    
+    # Add section content as context if provided
+    if section_content:
+        # Limit to 2000 chars for context
+        content_preview = section_content[:2000]
+        context_prompt = f"""Generate evaluation criteria (rubric) for the following section.
+
+**Section Title:** {section_title}
+
+**Section Content (for context):**
+```
+{content_preview}
+```
+
+**Your Task:**
+{filled_prompt}
+
+Provide a clear, structured rubric with specific evaluation metrics that can be used to assess responses for this section. The rubric should be detailed enough to evaluate quality on a 1-5 scale."""
+    else:
+        context_prompt = f"""Generate evaluation criteria (rubric) for the following section.
+
+**Section Title:** {section_title}
+
+**Your Task:**
+{filled_prompt}
+
+Provide a clear, structured rubric with specific evaluation metrics that can be used to assess responses for this section. The rubric should be detailed enough to evaluate quality on a 1-5 scale."""
+    
+    logger.debug(f"Generating rubric - Section: {section_title}, Prompt length: {len(context_prompt)}")
+    logger.info("Calling OpenAI API for rubric generation...")
+    
+    try:
+        # Call OpenAI API
+        start_time = datetime.now()
+        openai_client = get_openai_client()
+        response = openai_client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are an expert at creating evaluation rubrics for RFP responses. Generate clear, specific, and actionable evaluation criteria."},
+                {"role": "user", "content": context_prompt}
+            ]
+        )
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        
+        logger.info(f"Rubric generation completed in {duration:.2f} seconds")
+        
+        # Extract the response text
+        result = response.choices[0].message.content
+        logger.debug(f"Rubric generated, length: {len(result)}")
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error generating rubric: {str(e)}", exc_info=True)
+        raise
+
+
+@app.route('/generate-rubric', methods=['POST'])
+def generate_rubric():
+    """Generate a rubric for a section using a master prompt template"""
+    logger.info("Generate rubric endpoint called")
+    
+    try:
+        data = request.get_json()
+        
+        if not data:
+            logger.warning("No data provided in request")
+            return jsonify({'error': 'No data provided'}), 400
+        
+        master_prompt = data.get('master_prompt', '').strip()
+        section_title = data.get('section_title', '').strip()
+        section_content = data.get('section_content', '').strip() or None
+        
+        if not master_prompt:
+            logger.warning("Master prompt not provided")
+            return jsonify({'error': 'Master prompt is required'}), 400
+        
+        if not section_title:
+            logger.warning("Section title not provided")
+            return jsonify({'error': 'Section title is required'}), 400
+        
+        logger.info(f"Generating rubric for section: {section_title}")
+        
+        try:
+            rubric = generate_rubric_from_template(master_prompt, section_title, section_content)
+            logger.info(f"Rubric generated successfully for section: {section_title}")
+            
+            return jsonify({
+                'success': True,
+                'rubric': rubric
+            })
+        except AuthenticationError as e:
+            logger.error(f"Authentication error - {str(e)}")
+            return jsonify({
+                'success': False,
+                'error': 'OpenAI API authentication failed. Please check that your OPENAI_API_KEY environment variable is correct and valid.'
+            }), 401
+        except RateLimitError as e:
+            logger.warning(f"Rate limit error - {str(e)}")
+            return jsonify({
+                'success': False,
+                'error': 'OpenAI API rate limit exceeded. Please try again in a moment.'
+            }), 429
+        except APIError as api_error:
+            error_msg = str(api_error)
+            logger.error(f"API error - {error_msg}")
+            if "insufficient_quota" in error_msg.lower() or "quota" in error_msg.lower():
+                return jsonify({
+                    'success': False,
+                    'error': 'OpenAI API quota exceeded. Please check your OpenAI account billing and usage limits.'
+                }), 402
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': f'OpenAI API error: {error_msg}'
+                }), 500
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Unexpected error generating rubric: {error_msg}", exc_info=True)
+            return jsonify({
+                'success': False,
+                'error': f'Error generating rubric: {error_msg}'
+            }), 500
+    
+    except Exception as e:
+        logger.error(f"Unexpected error in generate_rubric endpoint: {str(e)}", exc_info=True)
+        return jsonify({
+            'error': f'An error occurred: {str(e)}'
+        }), 500
 
 
 def evaluate_single_section(rfp_text, rubric_text, retry_count=0):
